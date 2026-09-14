@@ -12,7 +12,6 @@ button.primary:hover { background:#b5f5db; }
 header { height:60px; display:flex; align-items:center; gap:20px; padding:0 22px; border-bottom:1px solid var(--border); background:#15191c; }
 .brand { display:flex; align-items:center; gap:10px; font-size:17px; font-weight:600; letter-spacing:-.2px; }
 .brand-mark { font-size:29px; color:var(--accent); line-height:1; }
-.local-badge { font-size:9px; letter-spacing:1.4px; color:var(--muted); border:1px solid #394249; border-radius:3px; padding:2px 4px; font-weight:500; margin-left:3px; }
 #source-name { margin-left:auto; color:var(--muted); max-width:40vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 main { display:flex; height:calc(100dvh - 60px); }
 aside { width:282px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--border); overflow:auto; display:flex; flex-direction:column; }
@@ -119,7 +118,6 @@ svg .pin { fill:#000; stroke:#fff; stroke-width:2; }
   aside { width:226px; }
   header { padding:0 14px; }
   .brand { font-size:14px; }
-  .local-badge { display:none; }
   .angle-presets { display:none; }
   .toolbar { gap:6px; }
   .viewport-footer>span:nth-child(2) { display:none; }

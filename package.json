@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "python server.py --open"
+    "start": "npm run build && esbuild --servedir=dist --serve=127.0.0.1:8769",
+    "build": "node build.js"
   },
   "dependencies": {
     "three": "0.186.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

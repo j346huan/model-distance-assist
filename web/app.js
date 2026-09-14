@@ -6,7 +6,6 @@ const $ = id => document.getElementById(id);
 const $$ = selector => document.querySelectorAll(selector);
 const dimensionIds = ['box-width','box-depth','box-height'];
 const sides = ['left','right','top','bottom'];
-const sessionKey = 'model-distance-assist-session';
 const toVector = ({x,y,z}) => new THREE.Vector3(x,y,z);
 const viewport = $('viewport'), overlay = $('overlay');
 const scene = new THREE.Scene();
@@ -25,13 +24,18 @@ const fillLight = new THREE.DirectionalLight(0xbbd6ff,1);
 fillLight.position.set(25,12,-30); scene.add(fillLight);
 
 const state = {
-  box:{width:16,depth:16,height:24},mode:'horizontal',angle:0,zoom:1,
+  box:{width:10,depth:10,height:10},mode:'horizontal',angle:0,zoom:1,
   panX:0,panY:0,baseHeight:32,width:1,height:1,
-  model:null,meshes:[],pin:null,metadata:null,
+  model:null,meshes:[],pin:null,source:null,file:null,objects:[],
   boxLines:null,grid:null,busy:false,setupOpen:true,
 };
 const raycaster = new THREE.Raycaster();
-const loader = new GLTFLoader();
+const manager = new THREE.LoadingManager();
+manager.setURLModifier(url=>{
+  if(!/^(data:|blob:)/i.test(url))throw new Error('Use a GLB with embedded textures and geometry.');
+  return url;
+});
+const loader = new GLTFLoader(manager);
 const screenVector = new THREE.Vector3();
 let scheduled = false, toastTimer, gridKey='';
 const vectors = () => {
@@ -57,104 +61,194 @@ function setSetup(open) {
 }
 function setBusy(busy) {
   state.busy=busy;
-  $$('#configuration input, #configuration select, #load-model, #import-header, #blend-file').forEach(el=>el.disabled=busy);
+  $$('#configuration input, #configuration select, #load-model, #import-header, #model-file').forEach(el=>el.disabled=busy);
 }
-async function api(url,options) {
-  const response=await fetch(url,options);
-  let data;
-  try{data=await response.json();}catch{throw new Error('The local viewer server returned an unreadable response.');}
-  if(!response.ok) throw new Error(data.error||data.message||'The request could not be completed.');
-  return data;
+function storedSession(value) {
+  return new Promise((resolve,reject)=>{
+    const request=indexedDB.open('model-distance-assist',1);
+    request.onupgradeneeded=()=>request.result.createObjectStore('sessions');
+    request.onerror=()=>reject(request.error);
+    request.onsuccess=()=>{
+      const db=request.result, transaction=db.transaction('sessions',value===undefined?'readonly':'readwrite');
+      const store=transaction.objectStore('sessions');
+      const action=value===undefined?store.get('current'):store.put(value,'current');
+      transaction.oncomplete=()=>{db.close();resolve(action.result);};
+      transaction.onabort=transaction.onerror=()=>{db.close();reject(transaction.error);};
+    };
+  });
 }
-async function waitJob(id) {
-  for(;;) {
-    const job=await api('/api/jobs/'+encodeURIComponent(id));
-    $('progress').value=job.progress||0;
-    $('progress-message').textContent=job.message||'Working…';
-    if(job.status==='done') return job.result;
-    if(job.status==='error') throw new Error(job.message||'Blender could not read this file.');
-    await new Promise(resolve=>setTimeout(resolve,550));
+function validateGLB(buffer) {
+  const view=new DataView(buffer);
+  if(buffer.byteLength<20||view.getUint32(0,true)!==0x46546c67||view.getUint32(4,true)!==2||view.getUint32(8,true)!==buffer.byteLength||view.getUint32(16,true)!==0x4e4f534a) {
+    throw new Error('Choose a valid GLB 2.0 file.');
+  }
+  const length=view.getUint32(12,true);
+  if(length>buffer.byteLength-20)throw new Error('This GLB file is incomplete.');
+  const json=JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,20,length)));
+  for(const item of [...(json.buffers||[]),...(json.images||[])]) {
+    if(item.uri!==undefined&&(typeof item.uri!=='string'||!/^data:/i.test(item.uri))) {
+      throw new Error('Use a GLB with embedded textures and geometry.');
+    }
   }
 }
-function populateConfiguration(metadata) {
-  state.metadata=metadata; $('configuration').hidden=false;
-  const select=$('box-object'); select.replaceChildren();
-  for(const object of metadata.objects.filter(o=>o.type==='MESH')) {
+function meshMatrices(mesh,visit) {
+  if(mesh.isInstancedMesh) {
+    for(let i=0;i<mesh.count;i++) {
+      const matrix=new THREE.Matrix4();
+      mesh.getMatrixAt(i,matrix);visit(matrix.premultiply(mesh.matrixWorld));
+    }
+  }else visit(mesh.matrixWorld);
+}
+function meshSet(root) {
+  const meshes=new Set();
+  root.traverse(node=>{if(node.isMesh)meshes.add(node);});
+  return meshes;
+}
+function localBounds(node) {
+  if(node.matrixWorld.determinant()===0)throw new Error('The box has a zero scale. Choose another object.');
+  const inverse=node.matrixWorld.clone().invert(), bounds=new THREE.Box3(), point=new THREE.Vector3();
+  for(const mesh of meshSet(node))meshMatrices(mesh,world=>{
+    const matrix=inverse.clone().multiply(world);
+    for(let i=0;i<mesh.geometry.attributes.position.count;i++)bounds.expandByPoint(mesh.getVertexPosition(i,point).applyMatrix4(matrix));
+  });
+  const size=bounds.getSize(new THREE.Vector3());
+  if(!size.toArray().every(n=>Number.isFinite(n)&&n>0))throw new Error('Choose a box with width, depth, and height.');
+  return bounds;
+}
+function inspectObjects(gltf) {
+  const nodes=[];
+  gltf.scene.traverse(node=>{
+    const index=gltf.parser.associations.get(node)?.nodes;
+    if(index!==undefined&&meshSet(node).size)nodes.push({id:String(index),name:node.name||'Object '+(index+1),node});
+  });
+  const semantic=new Set(nodes.map(item=>item.node));
+  for(const object of nodes) {
+    object.meshes=[];
+    const visit=node=>{
+      if(node!==object.node&&semantic.has(node))return;
+      if(node.isMesh)object.meshes.push(node);
+      node.children.forEach(visit);
+    };
+    visit(object.node);
+  }
+  return nodes;
+}
+function populateConfiguration() {
+  $('configuration').hidden=false;
+  const select=$('box-object');select.replaceChildren();
+  for(const object of state.objects) {
     const option=document.createElement('option');
-    option.value=object.id; option.textContent=object.name+(object.suggestedBox?' · wood block':'');
-    select.append(option);
+    option.value=object.id;option.textContent=object.name;select.append(option);
   }
-  if(metadata.suggestedBox) select.value=metadata.suggestedBox;
-  if(!select.value) select.selectedIndex=0;
+  const suggested=state.objects.find(o=>/box|block|stock|cube/i.test(o.name))||state.objects.find(o=>o.meshes.length===1&&o.meshes[0].geometry.attributes.position.count<=24);
+  if(suggested)select.value=suggested.id;
   changeBox();
 }
 function changeBox() {
-  if(!state.metadata) return;
-  const box=state.metadata.objects.find(o=>o.id===$('box-object').value);
-  if(box?.dimensions) {
-    dimensionIds.forEach((id,i)=>$(id).value=rounded(box.dimensions[i]));
-  }
-  const list=$('model-objects'); list.replaceChildren();
-  for(const object of state.metadata.objects.filter(o=>o.type==='MESH'&&o.id!==box?.id)) {
+  if(!state.source)return;
+  error('');
+  const box=state.objects.find(o=>o.id===$('box-object').value), list=$('model-objects');
+  list.replaceChildren();
+  if(!box)return;
+  try {
+    const size=localBounds(box.node).getSize(new THREE.Vector3());
+    const elements=box.node.matrixWorld.elements;
+    const dimensions=[size.x*Math.hypot(...elements.slice(0,3)),size.z*Math.hypot(...elements.slice(8,11)),size.y*Math.hypot(...elements.slice(4,7))];
+    dimensionIds.forEach((id,i)=>$(id).value=Number((dimensions[i]*100).toPrecision(6)));
+  }catch(e){error(e.message);}
+  const excluded=meshSet(box.node);
+  for(const object of state.objects.filter(o=>o.meshes.some(mesh=>!excluded.has(mesh)))) {
     const label=document.createElement('label'), checkbox=document.createElement('input');
-    checkbox.type='checkbox'; checkbox.value=object.id;
-    checkbox.checked=object.visible!==false;
-    checkbox.addEventListener('change',updateMeshCount);
+    checkbox.type='checkbox';checkbox.value=object.id;
+    let visible=true;
+    for(let node=object.node;node;node=node.parent)visible=visible&&node.visible;
+    checkbox.checked=visible;checkbox.addEventListener('change',updateMeshCount);
     label.append(checkbox,document.createTextNode(object.name));list.append(label);
   }
   updateMeshCount();
 }
 function updateMeshCount(){ $('mesh-count').textContent=$$('#model-objects input:checked').length+' selected'; }
-async function importFile(file) {
-  if(state.busy||!file) return;
-  setSetup(true);error('');
-  if(!file.name.toLowerCase().endsWith('.blend')) {error('Choose a .blend file.');return;}
-  setBusy(true);$('configuration').hidden=true;$('import-progress').hidden=false;
-  $('progress').value=0;$('progress-message').textContent='Copying '+file.name+' into the viewer…';
-  try {
-    const job=await api('/api/import?filename='+encodeURIComponent(file.name),{
-      method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file
-    });
-    const metadata=await waitJob(job.jobId);
-    populateConfiguration(metadata);
-  }catch(e){error(e.message);}finally{setBusy(false);$('import-progress').hidden=true;$('blend-file').value='';}
-}
-async function loadSelection() {
-  if(state.busy||!state.metadata) return;
-  error('');
-  const boxSizeCm=dimensionIds.map(id=>Number($(id).value));
-  const modelObjects=[...$$('#model-objects input:checked')].map(el=>el.value);
-  if(boxSizeCm.some(n=>!Number.isFinite(n)||n<=0)){error('Enter a positive size for each side of the box.');return;}
-  if(!modelObjects.length){error('Select at least one model object.');return;}
-  setBusy(true);$('import-progress').hidden=false;
-  try {
-    const job=await api('/api/load',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({assetId:state.metadata.assetId,boxObject:$('box-object').value,boxSizeCm,modelObjects})});
-    const result=await waitJob(job.jobId);
-    $('progress-message').textContent='Loading model and textures…';
-    await displayModel(result);
-    try {localStorage.setItem(sessionKey,JSON.stringify({loaded:result,metadata:state.metadata,boxObject:$('box-object').value,modelObjects}));}catch{}
-    setSetup(false);
-  }catch(e){error(e.message);}finally{setBusy(false);$('import-progress').hidden=true;}
-}
-function disposeModel(root) {
+function disposeModel(root,source=false) {
   const textures=new Set(),materials=new Set(),geometries=new Set();
   root?.traverse(object=>{
     if(!object.isMesh)return;
     geometries.add(object.geometry);
-    for(const m of [...(Array.isArray(object.material)?object.material:[object.material]),...(object.userData.viewerMaterials||[])])if(m)materials.add(m);
+    for(const material of object.userData.viewerMaterials||(Array.isArray(object.material)?object.material:[object.material]))if(material)materials.add(material);
   });
-  for(const m of materials){for(const value of Object.values(m))if(value?.isTexture)textures.add(value);m.dispose();}
-  textures.forEach(t=>t.dispose());geometries.forEach(g=>g.dispose());
+  for(const material of materials) {
+    if(source)for(const value of Object.values(material))if(value?.isTexture)textures.add(value);
+    material.dispose();
+  }
+  textures.forEach(texture=>texture.dispose());geometries.forEach(geometry=>geometry.dispose());
 }
-async function displayModel(result) {
-  const gltf=await loader.loadAsync(result.modelUrl);
+function clearModel() {
   if(state.model){scene.remove(state.model);disposeModel(state.model);}
-  state.model=gltf.scene;state.meshes=[];state.pin=null;
-  state.model.traverse(object=>{
-    if(!object.isMesh)return;
-    state.meshes.push(object);
-    const originals=Array.isArray(object.material)?object.material:[object.material];
+  state.model=null;state.meshes=[];state.pin=null;
+  if(state.boxLines)state.boxLines.visible=false;
+  clearGrid();updateReadouts();
+  $('empty-state').hidden=false;$('block-summary').hidden=true;$('warnings').hidden=true;
+  $('source-name').textContent='No model loaded';requestDraw();
+}
+async function readModel(file) {
+  $('progress').value=10;$('progress-message').textContent='Reading '+file.name+'…';
+  const buffer=await file.arrayBuffer();validateGLB(buffer);
+  $('progress').value=35;$('progress-message').textContent='Loading model and textures…';
+  const gltf=await loader.parseAsync(buffer,'');
+  gltf.scene.updateMatrixWorld(true);
+  gltf.scene.traverse(node=>node.skeleton?.update());
+  const objects=inspectObjects(gltf);
+  if(!objects.length){disposeModel(gltf.scene,true);throw new Error('This GLB contains no mesh objects.');}
+  clearModel();disposeModel(state.source,true);
+  state.source=gltf.scene;state.file=file;state.objects=objects;
+  $('progress').value=100;populateConfiguration();
+}
+async function importFile(file) {
+  if(state.busy||!file)return;
+  setSetup(true);error('');
+  if(!file.name.toLowerCase().endsWith('.glb')){error('Choose a .glb file.');return;}
+  setBusy(true);$('import-progress').hidden=false;
+  try{await readModel(file);}catch(e){error(e.message);}
+  finally{setBusy(false);$('import-progress').hidden=true;$('model-file').value='';}
+}
+function selection() {
+  const boxSizeCm=dimensionIds.map(id=>Number($(id).value));
+  const modelObjects=[...$$('#model-objects input:checked')].map(el=>el.value);
+  if(boxSizeCm.some(n=>!Number.isFinite(n)||n<=0))throw new Error('Enter a positive size for each side of the box.');
+  if(!modelObjects.length)throw new Error('Select at least one model object.');
+  return {boxObject:$('box-object').value,boxSizeCm,modelObjects};
+}
+async function loadSelection() {
+  if(state.busy||!state.source)return;
+  error('');
+  try {
+    const selected=selection();setBusy(true);$('import-progress').hidden=false;
+    $('progress').value=70;$('progress-message').textContent='Preparing view…';
+    await new Promise(requestAnimationFrame);
+    displaySelection(selected);setSetup(false);
+    try{await storedSession({file:state.file,...selected});}catch{toast('Loaded. This browser could not save the session.');}
+  }catch(e){error(e.message);}finally{setBusy(false);$('import-progress').hidden=true;}
+}
+function displaySelection(selected) {
+  const box=state.objects.find(o=>o.id===selected.boxObject);
+  if(!box)throw new Error('Choose a box object.');
+  const bounds=localBounds(box.node), size=bounds.getSize(new THREE.Vector3()), center=bounds.getCenter(new THREE.Vector3());
+  const [width,depth,height]=selected.boxSizeCm;
+  const transform=new THREE.Matrix4().makeScale(width/size.x,height/size.y,depth/size.z)
+    .multiply(new THREE.Matrix4().makeTranslation(-center.x,-center.y,-center.z)).multiply(box.node.matrixWorld.clone().invert());
+  const excluded=meshSet(box.node), meshes=new Set();
+  for(const object of state.objects)if(selected.modelObjects.includes(object.id))for(const mesh of object.meshes)if(!excluded.has(mesh))meshes.add(mesh);
+  if(!meshes.size)throw new Error('Select at least one model object outside the box object.');
+  const model=new THREE.Group();
+  for(const source of meshes)meshMatrices(source,world=>{
+    const geometry=source.geometry.clone();
+    if(source.isSkinnedMesh||source.morphTargetInfluences?.some(value=>value!==0)) {
+      const position=geometry.attributes.position, point=new THREE.Vector3();
+      for(let i=0;i<position.count;i++){source.getVertexPosition(i,point);position.setXYZ(i,point.x,point.y,point.z);}
+      geometry.morphAttributes={};geometry.computeVertexNormals();
+    }
+    const object=new THREE.Mesh(geometry);object.name=source.name;
+    object.matrixAutoUpdate=false;object.matrix.copy(transform).multiply(world);
+    const originals=Array.isArray(source.material)?source.material:[source.material];
     const textured=originals.map(original=>new THREE.MeshBasicMaterial({
       map:original.map,color:original.color,side:THREE.DoubleSide,
       transparent:original.transparent,opacity:original.opacity,
@@ -165,22 +259,22 @@ async function displayModel(result) {
       transparent:original.transparent,opacity:original.opacity,alphaTest:original.alphaTest
     }));
     object.userData.viewerTextured=textured;object.userData.viewerShaded=shaded;
-    object.userData.viewerMaterials=[...originals,...textured,...shaded];
-    object.material=Array.isArray(object.material)?textured:textured[0];
+    object.userData.viewerMaterials=[...textured,...shaded];
+    object.material=Array.isArray(source.material)?textured:textured[0];model.add(object);
   });
-  scene.add(state.model);state.model.updateMatrixWorld(true);
-  const [width,depth,height]=result.boxSizeCm;
+  if(state.model){scene.remove(state.model);disposeModel(state.model);}
+  state.model=model;state.meshes=model.children;state.pin=null;
+  scene.add(model);model.updateMatrixWorld(true);
   state.box={width,depth,height};state.mode='horizontal';state.angle=0;
-  $('show-texture').checked=true;
-  $('empty-state').hidden=true;$('source-name').textContent=result.sourceName;
+  $('show-texture').checked=true;$('empty-state').hidden=true;$('source-name').textContent=state.file.name;
   $('block-summary').hidden=false;$('block-summary').innerHTML='<strong>'+rounded(width)+' × '+rounded(depth)+' × '+rounded(height)+' cm</strong> · width × depth × height';
-  const warnings=[...(result.warnings||[])];
-  const modelBounds=new THREE.Box3().setFromObject(state.model);
+  const modelBounds=new THREE.Box3().setFromObject(model,true);
   const stockBounds=new THREE.Box3(new THREE.Vector3(-width/2,-height/2,-depth/2),new THREE.Vector3(width/2,height/2,depth/2));
-  if(!stockBounds.expandByScalar(.002).containsBox(modelBounds))warnings.push('Model extends outside the box.');
-  $('warnings').textContent=warnings.join(' ');$('warnings').hidden=!warnings.length;
+  const outside=!stockBounds.expandByScalar(.002).containsBox(modelBounds);
+  $('warnings').textContent=outside?'Model extends outside the box.':'';$('warnings').hidden=!outside;
   makeBox();fitView();updateControls();
 }
+
 function makeBox(){
   gridKey='';
   if(state.boxLines){scene.remove(state.boxLines);state.boxLines.geometry.dispose();state.boxLines.material.dispose();}
@@ -406,8 +500,8 @@ $('show-texture').addEventListener('change',()=>{
   }requestDraw();
 });
 $('setup-toggle').addEventListener('click',()=>setSetup(!state.setupOpen));
-$('import-header').addEventListener('click',()=>$('blend-file').click());
-$('blend-file').addEventListener('change',event=>importFile(event.target.files[0]));
+$('import-header').addEventListener('click',()=>$('model-file').click());
+$('model-file').addEventListener('change',event=>importFile(event.target.files[0]));
 $('box-object').addEventListener('change',changeBox);
 $('load-model').addEventListener('click',loadSelection);
 const drop=$('drop-zone');
@@ -419,20 +513,16 @@ document.addEventListener('drop',event=>{event.preventDefault();if(event.target!
 window.addEventListener('error',()=>toast('Unable to render. Reload the page.',6000));
 async function restore(){
   setBusy(true);
-  try{
-    const health=await api('/api/health');
-    if(health.blenderAvailable===false)error('Blender not found. Set BLENDER_PATH or start with --blender.');
-    const previous=JSON.parse(localStorage.getItem(sessionKey)||'null');
-    if(previous?.loaded){
-      toast('Restoring your last model…',0);
-      if(previous.metadata){
-        populateConfiguration(previous.metadata);
-        $('box-object').value=previous.boxObject;changeBox();
-        dimensionIds.forEach((id,i)=>$(id).value=previous.loaded.boxSizeCm[i]);
-        $$('#model-objects input').forEach(el=>el.checked=previous.modelObjects.includes(el.value));updateMeshCount();
-      }
-      await displayModel(previous.loaded);setSetup(false);$('viewport-status').textContent='';
+  try {
+    const previous=await storedSession();
+    if(previous?.file) {
+      $('import-progress').hidden=false;
+      await readModel(previous.file);
+      $('box-object').value=previous.boxObject;changeBox();
+      dimensionIds.forEach((id,i)=>$(id).value=previous.boxSizeCm[i]);
+      $$('#model-objects input').forEach(el=>el.checked=previous.modelObjects.includes(el.value));updateMeshCount();
+      displaySelection(previous);setSetup(false);
     }
-  }catch{toast('Import a .blend file.');}finally{setBusy(false);}
+  }catch{toast('Import a .glb file.');}finally{setBusy(false);$('import-progress').hidden=true;}
 }
 resize();updateControls();restore();
