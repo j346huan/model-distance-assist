@@ -50,7 +50,6 @@ progress { width:100%; height:5px; accent-color:var(--accent); margin-top:20px; 
 .legend { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin:16px 0 9px; }
 .edge-dot,.wall-dot { display:inline-block; width:5px; height:5px; vertical-align:2px; margin-right:4px; background:var(--edge); }
 .wall-dot { background:var(--wall); transform:rotate(45deg); }
-#point-hint { color:var(--muted); font-size:12px; margin:0; }
 .readouts { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
 .readouts th { font-weight:400; text-align:left; color:var(--muted); }
 .readouts thead th { font-size:10px; padding-bottom:6px; text-align:right; }
@@ -59,7 +58,6 @@ progress { width:100%; height:5px; accent-color:var(--accent); margin-top:20px; 
 .readouts td:nth-child(2) { color:var(--edge); }
 .readouts td:nth-child(3) { color:var(--wall); }
 .readouts tbody th { font-size:11px; border-top:1px solid #283037; }
-.point-position { font:10px/1.6 Consolas,monospace; color:var(--muted); margin-top:10px; }
 .check-label { display:flex; align-items:center; gap:7px; font-size:12px; margin:8px 0; }
 .check-label input { margin:0; }
 .sidebar-footer { padding:20px; margin-top:auto; color:var(--muted); font-size:11px; }
@@ -83,9 +81,8 @@ progress { width:100%; height:5px; accent-color:var(--accent); margin-top:20px; 
 #viewport { position:relative; min-height:180px; flex:1; background:#000; overflow:hidden; touch-action:none; outline:none; cursor:crosshair; }
 #scene,#overlay { position:absolute; inset:0; width:100%; height:100%; display:block; }
 #overlay { pointer-events:none; overflow:hidden; }
-.view-badge,.grid-badge { position:absolute; top:17px; color:#9aa7b0; font:10px/1.5 "Segoe UI",sans-serif; letter-spacing:1.1px; pointer-events:none; background:#000a; border-radius:3px; padding:3px 6px; }
+.view-badge { position:absolute; top:17px; color:#9aa7b0; font:10px/1.5 "Segoe UI",sans-serif; letter-spacing:1.1px; pointer-events:none; background:#000a; border-radius:3px; padding:3px 6px; }
 .view-badge { left:15px; }
-.grid-badge { right:15px; color:#677982; letter-spacing:.2px; }
 .viewport-footer { display:flex; justify-content:space-between; gap:10px; padding:7px 17px; border-top:1px solid #232a2f; font-size:10px; color:var(--muted); }
 #empty-state { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; pointer-events:none; color:#64727a; }
 #empty-state h1 { font-size:20px; font-weight:400; color:#b2bfc6; margin:12px 0 0; }

@@ -306,7 +306,6 @@ function clearGrid(){
 function updateGrid(){
   const pixelsPerCm=state.height*state.zoom/state.baseHeight;
   const fade=state.zoom<=1?0:THREE.MathUtils.clamp((pixelsPerCm*.1-4)/4,0,1);
-  $('grid-badge').textContent=$('show-grid').checked?(fade>0?'1 mm grid · 1 cm major':'1 cm grid'):'Grid hidden';
   const key=[state.mode,state.angle,state.zoom.toFixed(4),state.width,state.height,state.baseHeight,JSON.stringify(state.box),$('show-grid').checked].join('|');
   if(key===gridKey)return;gridKey=key;clearGrid();
   if(!$('show-grid').checked||!state.model)return;
@@ -353,8 +352,6 @@ function updateReadouts(){
     row.children[2].textContent=m?fmt(m.wall[row.dataset.side]):'—';
   }
   $('clear-point').disabled=!m;
-  $('point-hint').textContent=m?'Point selected.':'Select a point.';
-  $('point-position').textContent=m?'X '+fmt(m.point.x)+' · Y '+fmt(m.point.y)+' · Z '+fmt(m.point.z)+' mm from center':'';
   return m;
 }
 function svgLine(a,b,cls){return '<line class="'+cls+'" x1="'+a.x+'" y1="'+a.y+'" x2="'+b.x+'" y2="'+b.y+'"/>';}
@@ -372,7 +369,7 @@ function labelFor(side,edge,wall,p,end) {
 function updateOverlay(){
   if(!state.model){overlay.replaceChildren();return;}
   const bounds=projectedBounds(state.box,state.mode,state.angle);
-  const {right,up,outward}=vectors();
+  const {right,up}=vectors();
   const plane=(x,y)=>screenPoint(right.clone().multiplyScalar(x).addScaledVector(up,y));
   const tl=plane(bounds.minX,bounds.maxY),br=plane(bounds.maxX,bounds.minY);
   let svg='<rect class="box-outline" x="'+tl.x+'" y="'+tl.y+'" width="'+(br.x-tl.x)+'" height="'+(br.y-tl.y)+'"/>';
@@ -395,10 +392,6 @@ function updateOverlay(){
     }
     svg+='<circle class="pin" cx="'+p.x+'" cy="'+p.y+'" r="5"/><circle cx="'+p.x+'" cy="'+p.y+'" r="1.5" fill="white"/>';
     svg+=labels;
-    raycaster.set(m.point.clone().addScaledVector(outward,Math.max(...Object.values(state.box))*5),outward.clone().negate());
-    const hit=raycaster.intersectObjects(state.meshes,false)[0];
-    const hidden=hit&&hit.point.distanceTo(m.point)>.015;
-    $('point-hint').textContent=!m.wall.inside?'Point outside box.':hidden?'Point occluded.':'Point selected.';
   }
   overlay.innerHTML=svg;
 }
